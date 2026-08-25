@@ -59,6 +59,25 @@
             margin-bottom: 10px;
         }
 
+        .wallet-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .wallet-buttons button {
+            flex: 1;
+            margin-top: 0;
+        }
+
+        button.metamask {
+            background: #f6851b;
+        }
+
+        button.rabby {
+            background: #8697ff;
+        }
+
         .status {
             margin-top: 15px;
             padding: 10px;
@@ -116,7 +135,10 @@
     <div class="card">
         <h1>Disperse Clone (安全版)</h1>
 
-        <button id="connectBtn">连接钱包</button>
+        <div class="wallet-buttons">
+            <button id="connectMetaMaskBtn" class="metamask">🦊 MetaMask</button>
+            <button id="connectRabbyBtn" class="rabby">💠 Rabby Wallet</button>
+        </div>
         <label>选择网络</label>
         <select id="networkSelect" disabled>
             <option value="1">Ethereum Mainnet</option>
@@ -176,28 +198,57 @@
         const ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/;
 
         let provider, signer, userAddress;
+        let currentWalletId = null;
 
         let cachedTokenDecimals = null;
         let cachedTokenName = null;
 
-        const connectBtn = document.getElementById('connectBtn');
+        const connectMetaMaskBtn = document.getElementById('connectMetaMaskBtn');
+        const connectRabbyBtn = document.getElementById('connectRabbyBtn');
         const disperseBtn = document.getElementById('disperseBtn');
         const approveBtn = document.getElementById('approveBtn');
         const statusMsg = document.getElementById('statusMsg');
 
+        // ---- EIP-1193 provider 选择与获取 ----
+        // 使用 WALLET_IDS 在窗口对象上查找可用钱包。Rabby 注入时会同时提供
+        // window.rabby (推荐优先) 和 window.ethereum (当没有其它钱包时)。
+        // 优先顺序: window.rabby (Rabby 专用), window.ethereum (MetaMask 及其它)
+        function getWalletProvider(walletId) {
+            if (walletId === 'rabby') {
+                if (window.rabby) return window.rabby;
+                // 回退: 若 Rabby 没有注入 window.rabby, 尝试用 ethereum 的标识
+                const mm = window.ethereum;
+                if (mm && mm.providers) {
+                    const rabby = mm.providers.find(p => p.isRabby);
+                    if (rabby) return rabby;
+                }
+                if (mm && mm.isRabby) return mm;
+                return null;
+            }
+            // 默认 (metamask)
+            if (window.ethereum && window.ethereum.isMetaMask) return window.ethereum;
+            if (window.ethereum && window.ethereum.providers) {
+                const mm = window.ethereum.providers.find(p => p.isMetaMask);
+                if (mm) return mm;
+            }
+            if (window.ethereum) return window.ethereum; // 兜底: 唯一的 ethereum 提供者
+            return null;
+        }
+
         // 确保钱包在目标网络上（尝试请求切换）
         async function ensureCorrectNetwork(targetChainId) {
-            if (!window.ethereum) throw new Error('请安装 MetaMask!');
+            const ethereum = getWalletProvider(currentWalletId);
+            if (!ethereum) throw new Error('请选择并安装对应的钱包!');
             // 初始化 provider 若尚未
-            if (!provider) provider = new ethers.BrowserProvider(window.ethereum);
+            if (!provider) provider = new ethers.BrowserProvider(ethereum);
             const network = await provider.getNetwork();
             if (network.chainId === targetChainId) return;
             const target = CHAINS[targetChainId];
             showStatus(`当前网络为 ${network.chainId}，正在请求切换到 ${target ? target.name : targetChainId}...`, 'info');
             try {
-                await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: target ? target.chainIdHex : '0x' + targetChainId.toString(16) }] });
+                await ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: target ? target.chainIdHex : '0x' + targetChainId.toString(16) }] });
                 // 重新初始化 provider & signer
-                provider = new ethers.BrowserProvider(window.ethereum);
+                provider = new ethers.BrowserProvider(ethereum);
                 signer = await provider.getSigner();
                 userAddress = await signer.getAddress();
                 document.getElementById('walletInfo').style.display = 'block';
@@ -255,15 +306,20 @@
         }
 
         // 1. 连接钱包（在连接时尝试将钱包切换到所选网络）
-        connectBtn.onclick = async () => {
-            if (!window.ethereum) return showStatus("请安装 MetaMask!", "error");
+        async function connectWallet(walletId) {
+            const ethereum = getWalletProvider(walletId);
+            if (!ethereum) {
+                const names = { metamask: 'MetaMask', rabby: 'Rabby Wallet' };
+                return showStatus(`未检测到 ${names[walletId] || walletId}，请先安装浏览器插件!`, "error");
+            }
             try {
+                currentWalletId = walletId;
                 const selectedChain = parseInt(document.getElementById('networkSelect').value, 10);
                 // ensureCorrectNetwork 会在需要时请求切换并初始化 provider/signer
                 await ensureCorrectNetwork(selectedChain);
 
                 // 确保 provider/signer/userAddress 可用
-                provider = provider || new ethers.BrowserProvider(window.ethereum);
+                provider = provider || new ethers.BrowserProvider(ethereum);
                 signer = await provider.getSigner();
                 userAddress = await signer.getAddress();
 
@@ -272,7 +328,8 @@
 
                 document.getElementById('walletInfo').style.display = 'block';
                 document.getElementById('walletInfo').innerText = `已连接: ${userAddress} (${ninfo})`;
-                connectBtn.style.display = 'none';
+                connectMetaMaskBtn.style.display = 'none';
+                connectRabbyBtn.style.display = 'none';
                 // Enable UI controls after successful connection
                 document.getElementById('networkSelect').disabled = false;
                 document.getElementById('tokenSelect').disabled = false;
@@ -284,7 +341,10 @@
             } catch (err) {
                 showStatus("连接失败: " + err.message, "error");
             }
-        };
+        }
+
+        connectMetaMaskBtn.onclick = () => connectWallet('metamask');
+        connectRabbyBtn.onclick = () => connectWallet('rabby');
 
         // Token select population and change handling
         const tokenSelect = document.getElementById('tokenSelect');
